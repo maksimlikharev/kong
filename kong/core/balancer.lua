@@ -8,7 +8,11 @@ local table_concat = table.concat
 local crc32 = ngx.crc32_short
 local toip = dns_client.toip
 local log = ngx.log
+local sleep = ngx.sleep
+local min = math.min
+local max = math.max
 
+local CRIT  = ngx.CRIT
 local ERR   = ngx.ERR
 local WARN  = ngx.WARN
 local DEBUG = ngx.DEBUG
@@ -289,9 +293,50 @@ do
     end
   end
 
+  local creating = {}
+
+  local function wait(id)
+    local timeout = 30
+    local step = 0.001
+    local ratio = 2
+    local max_step = 0.5
+    while timeout > 0 do
+      sleep(step)
+      timeout = timeout - step
+      if not creating[id] then
+        return true
+      end
+      if timeout <= 0 then
+        break
+      end
+      step = min(max(0.001, step * ratio), timeout, max_step)
+    end
+    return nil, "timeout"
+  end
+
   ------------------------------------------------------------------------------
+  -- @param upstream (table) The upstream data
+  -- @param recreate (boolean, optional) create new balancer even if one exists
+  -- @param history (table, optional) history of target updates
+  -- @param start (integer, optional) from where to start reading the history
   -- @return The new balancer object, or nil+error
-  create_balancer = function(upstream, history, start)
+  create_balancer = function(upstream, recreate, history, start)
+
+    if balancers[upstream.id] and not recreate then
+      return balancers[upstream.id]
+    end
+
+    if creating[upstream.id] then
+      local ok = wait(upstream.id)
+      if ok then
+        return balancers[upstream.id]
+      else
+        return nil, "timeout waiting for balancer for " .. upstream.id
+      end
+    end
+
+    creating[upstream.id] = true
+
     local balancer, err = ring_balancer.new({
         wheelSize = upstream.slots,
         order = upstream.orderlist,
@@ -318,6 +363,8 @@ do
     -- only make the new balancer available for other requests after it
     -- is fully set up.
     balancers[upstream.id] = balancer
+
+    creating[upstream.id] = nil
 
     return balancer
   end
@@ -374,7 +421,7 @@ local function check_target_history(upstream, balancer)
 
   stop_healthchecker(balancer)
 
-  local new_balancer, err = create_balancer(upstream, new_history, 1)
+  local new_balancer, err = create_balancer(upstream, true, new_history, 1)
   if not new_balancer then
     return nil, err
   end
@@ -470,7 +517,7 @@ local function get_balancer(target, no_create)
       return nil, "balancer not found"
     else
       log(ERR, "balancer not found for ", upstream.name, ", will create it")
-      return create_balancer(upstream)
+      return create_balancer(upstream), upstream
     end
   end
 
@@ -523,7 +570,7 @@ local function on_upstream_event(operation, upstream)
 
     local _, err = create_balancer(upstream)
     if err then
-      log(ERR, "failed creating balancer for ", upstream.name, ": ", err)
+      log(CRIT, "failed creating balancer for ", upstream.name, ": ", err)
     end
 
   elseif operation == "delete" or operation == "update" then
@@ -540,7 +587,7 @@ local function on_upstream_event(operation, upstream)
     if operation == "delete" then
       balancers[upstream.id] = nil
     else
-      local _, err = create_balancer(upstream)
+      local _, err = create_balancer(upstream, true)
       if err then
         log(ERR, "failed recreating balancer for ", upstream.name, ": ", err)
       end
@@ -603,10 +650,10 @@ end
 
 
 local function init()
+
   local upstreams, err = get_all_upstreams()
   if not upstreams then
-    log(ngx.STDERR, "failed loading initial list of upstreams: ", err)
-    return
+    return nil, "failed loading initial list of upstreams: " .. err
   end
 
   local oks, errs = 0, 0
@@ -616,11 +663,12 @@ local function init()
     if ok ~= nil then
       oks = oks + 1
     else
-      log(ngx.STDERR, "failed creating balancer for ", name, ": ", err)
+      log(CRIT, "failed creating balancer for ", name, ": ", err)
       errs = errs + 1
     end
   end
   log(DEBUG, "initialized ", oks, " balancer(s), ", errs, " error(s)")
+
 end
 
 
