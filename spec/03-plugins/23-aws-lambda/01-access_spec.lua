@@ -68,7 +68,12 @@ describe("Plugin: AWS Lambda (access)", function()
 
     local api11 = assert(helpers.dao.apis:insert {
       name = "lambda11.com",
-      hosts = { "lambda11.com" },
+      hosts = { "lambda11.com" }
+    })
+
+    local api12 = assert(helpers.dao.apis:insert {
+      name = "lambda12.com",
+      hosts = { "lambda12.com" },
       upstream_url = helpers.mock_upstream_url,
     })
 
@@ -219,6 +224,18 @@ describe("Plugin: AWS Lambda (access)", function()
         forward_request_headers = true,
         forward_request_body = true,
         dynamic_lambda_key = "lambda-key"
+      }
+    })
+    assert(helpers.dao.plugins:insert {
+      name   = "aws-lambda",
+      api_id = api12.id,
+      config = {
+        port          = 10001,
+        aws_key       = "mock-key",
+        aws_secret    = "mock-secret",
+        aws_region    = "us-east-1",
+        function_name = "functionWithHandledError",
+        handled_status_pattern = "Error:([1-9][0-9][0-9])"
       }
     })
 
@@ -555,5 +572,35 @@ describe("Plugin: AWS Lambda (access)", function()
     })
     assert.res_status(200, res)
     assert.is_equal("kongLambdaTest", res.headers["x-amzn-RequestId"])
+  end)
+  it("invokes a Lambda function with an handled function error", function()
+    local res = assert(client:send {
+      method = "POST",
+      path = "/post",
+      headers = {
+        ["Host"] = "lambda12.com",
+        ["Content-Type"] = "application/x-www-form-urlencoded"
+      },
+      body = {
+        key1 = "Error:400"
+      }
+    })
+    assert.res_status(400, res)
+    assert.equal("Handled", res.headers["X-Amz-Function-Error"])
+  end)
+  it("invokes a Lambda function with an handled function error", function()
+    local res = assert(client:send {
+      method = "POST",
+      path = "/post",
+      headers = {
+        ["Host"] = "lambda12.com",
+        ["Content-Type"] = "application/x-www-form-urlencoded"
+      },
+      body = {
+        key1 = "value"
+      }
+    })
+    assert.res_status(200, res)
+    assert.equal("Handled", res.headers["X-Amz-Function-Error"])
   end)
 end)
