@@ -17,41 +17,88 @@ local ngx_encode_base64    = ngx.encode_base64
 local ngx_get_headers      = ngx.req.get_headers
 local get_uri_args         = ngx.req.get_uri_args
 local regex_find           = ngx.re.find
+local gsub                 = string.gsub
+local find                 = string.find
+local sub                  = string.sub
 
 local name_cache = setmetatable({}, { __mode = "k" })
-local CACHE_SIZE = 64
+local CACHE_SIZE = 256
 
 local function get_dynamic_name(conf)
   local hdrs = ngx_get_headers()
   local args = get_uri_args()
   local lambda_key = conf.dynamic_lambda_key
 
-  local function_name = hdrs[lambda_key]
-  if not function_name then
-    function_name = args[lambda_key]
+  local lambda_name = hdrs[lambda_key]
+  if not lambda_name then
+
+    print("not in headers: ")
+    lambda_name = args[lambda_key]
+    if not lambda_name then
+      print("not in arguments: ")
+
+      local uri = gsub(ngx.var.request_uri, "?.*", "")
+
+      print("request uri: " .. tostring(uri))
+
+      local _, endidx = find(uri, "/" .. lambda_key .. "/")
+
+      print("end index: " .. tostring(endidx))
+
+      if endidx then
+       lambda_name = sub(uri, endidx + 1)
+
+       print("path: " .. tostring(lambda_name))
+      end
+    end
   end
 
-  if function_name then
+  print("lambda name: " .. lambda_name)
+
+  if lambda_name then
     local cache = name_cache[conf]
     if not cache then
       cache = lrucache.new(CACHE_SIZE)
       name_cache[conf] = cache
     end
 
-    local found = cache:get(function_name)
-    if found then
-      ngx.log(ngx.DEBUG, "[aws-lambda] cache hit for: " .. function_name)
+    local function_name = cache:get(lambda_name)
+    if function_name then
+      ngx.log(ngx.DEBUG, "[aws-lambda] cache hit for: " .. lambda_name .. " mapped to: " .. function_name)
+
+      print("mapped: " .. lambda_name .. " to " .. function_name)
 
       return function_name, nil
     end
 
-    for _, pattern in ipairs(conf.dynamic_lambda_whitelist) do
-      if regex_find(function_name, pattern, "jo") then
-        ngx.log(ngx.DEBUG, "[aws-lambda] regexp hit for: " .. function_name .. " pattern: " .. pattern)
+    function_name = lambda_name
 
-        cache:set(function_name, 1)
+    if conf.dynamic_lambda_aliases then
+      for _, alias in ipairs(conf.dynamic_lambda_aliases) do
+        local lb_name, fn_name = alias:match("^([^:]+):*(.-)$")
 
-        return function_name, nil
+        print("function name: " .. fn_name .. " alias " .. lb_name)
+
+        if lb_name == lambda_name then
+          function_name = fn_name
+          break
+        end
+      end
+    end
+
+    print("function name resolved: " .. function_name)
+
+    if conf.dynamic_lambda_whitelist then
+      for _, pattern in ipairs(conf.dynamic_lambda_whitelist) do
+        if regex_find(function_name, pattern, "jo") then
+          ngx.log(ngx.DEBUG, "[aws-lambda] regexp hit for: " .. function_name .. " pattern: " .. pattern)
+
+          print("setting: " .. lambda_name .. " to " .. function_name)
+
+          cache:set(lambda_name, function_name)
+
+          return function_name, nil
+        end
       end
     end
 
@@ -134,34 +181,34 @@ function AWSLambdaHandler:access(conf)
   local host = string.format("lambda.%s.amazonaws.com", conf.aws_region)
   local port = conf.port or AWS_PORT
 
-  local function_name
+  local lambda_name
   if conf.dynamic_lambda_key then
 
     local error
-    function_name, error = get_dynamic_name(conf)
+    lambda_name, error = get_dynamic_name(conf)
 
     ngx.log(ngx.DEBUG, "[aws-lambda] using dynamic key: " ..
       conf.dynamic_lambda_key ..
-      ", resolved name: " .. tostring(function_name))
+      ", resolved name: " .. tostring(lambda_name))
 
     if error then
       -- indicate that function call is not allowed
       return responses.send_HTTP_FORBIDDEN(error)
     end
 
-    if not function_name then
+    if not lambda_name then
       ngx.log(ngx.WARN, "[aws-lambda] no name resolved with dynamic key: " ..
         conf.dynamic_lambda_key ..
-        ", will use default: " .. conf.function_name)
+        ", will use default: " .. conf.lambda_name)
     end
   end
 
   -- default
-  if not function_name then
-    function_name = conf.function_name
+  if not lambda_name then
+    lambda_name = conf.lambda_name
   end
 
-  local path = string.format("/2015-03-31/functions/%s/invocations", function_name)
+  local path = string.format("/2015-03-31/functions/%s/invocations", lambda_name)
 
   local opts = {
     region = conf.aws_region,
