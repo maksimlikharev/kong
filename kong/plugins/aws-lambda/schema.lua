@@ -22,10 +22,12 @@ local check_regex = function(value)
 end
 
 local function check_for_value(value)
-  for i, entry in ipairs(value) do
-    local ok = find(entry, ":")
-    if not ok then
-      return false, "key '" .. entry .. "' has no value"
+  if value then
+    for i, entry in ipairs(value) do
+      local ok = find(entry, ":")
+      if not ok then
+        return false, "key '" .. entry .. "' has no value"
+      end
     end
   end
   return true
@@ -132,8 +134,8 @@ return {
       func = check_regex
     },
     dynamic_lambda_aliases = {
-      type = "array",
-      func = check_for_value
+       type = "array",
+       func = check_for_value
     }
   },
 }
