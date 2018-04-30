@@ -29,7 +29,7 @@ local get_consumer_id = {
 }
 
 
-local metrics = {
+local _metrics = {
   status_count = function (api_name, message, metric_config, logger)
     local fmt = string_format("%s.request.status", api_name,
                        message.response.status)
@@ -79,6 +79,50 @@ local metrics = {
   end,
 }
 
+local dimensions = {
+  status_count = function (api_name, message, metric_config, logger)
+    if api_name then
+      logger:send_statsd(string_format("request.status.%s[api_name=%s]", message.response.status, api_name),
+                         1, logger.stat_types.counter, metric_config.sample_rate)
+
+      logger:send_statsd(string_format("request.status.%s[api_name=%s]", "total", api_name), 1,
+                         logger.stat_types.counter, metric_config.sample_rate)
+    end
+  end,
+  unique_users = function (api_name, message, metric_config, logger)
+    local get_consumer_id = get_consumer_id[metric_config.consumer_identifier]
+    local consumer_id     = get_consumer_id(message.consumer)
+
+    if consumer_id and api_name then
+      logger:send_statsd(string_format("user.uniques[api_name=%s]", api_name), consumer_id, logger.stat_types.set)
+    end
+  end,
+  request_per_user = function (api_name, message, metric_config, logger)
+    local get_consumer_id = get_consumer_id[metric_config.consumer_identifier]
+    local consumer_id     = get_consumer_id(message.consumer)
+
+    if consumer_id and api_name then
+      logger:send_statsd(string_format("user.request.count[api_name=%s,consumer_id=%s]", api_name, consumer_id),
+        1, logger.stat_types.counter, metric_config.sample_rate)
+    end
+  end,
+  status_count_per_user = function (api_name, message, metric_config, logger)
+    local get_consumer_id = get_consumer_id[metric_config.consumer_identifier]
+    local consumer_id     = get_consumer_id(message.consumer)
+
+    if consumer_id and api_name then
+      logger:send_statsd(string_format("user.request.status.%s[api_name=%s,consumer_id=%s]",
+          message.response.status, api_name, consumer_id),
+                         1, logger.stat_types.counter,
+                         metric_config.sample_rate)
+
+      logger:send_statsd(string_format("user.request.status.%s[api_name=%s,consumer_id=%s]",
+          "total", api_name, consumer_id),
+                         1, logger.stat_types.counter,
+                         metric_config.sample_rate)
+    end
+  end,
+}
 
 local function log(premature, conf, message)
   if premature then
@@ -132,7 +176,7 @@ local function log(premature, conf, message)
   end
 
   for _, metric_config in pairs(conf.metrics) do
-    local metric = metrics[metric_config.name]
+    local metric = dimensions[metric_config.name]
 
     if metric then
       metric(name, message, metric_config, logger)
